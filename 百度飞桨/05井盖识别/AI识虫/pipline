@@ -1,0 +1,131 @@
+一、Pipeline 简介
+Pipeline是一套面向AI开发任务的端到端编排组件，支持任务流程构建、可视化、调试、运行及节点级详情查看，功能覆盖AI开发全流程。
+
+Pipeline的目标是让AI开发者在研发过程中，全流程变得更加简单且高效（Simple and Efficient）。基于Pipeline构建的AI开发流程，能做到：
+
+-标准化（Standard）： 研发流程可标准化沉淀、自动化迭代
+
+-可复用（Reusable）： Op节点和Pipeline级别都支持可复用；pipeline 中的每个节点都是一个 Op， 每个 Op 都有自己需要运行的代码逻辑、输入和输出
+
+-可扩展（Scalable）： 节点资源可扩展，提供上下游接口对接能力
+
+
+二、 核心概念
+[Pipeline] : 一个完整的训练流程，可以包含一个或者多个节点
+
+[Op] : pipeline 中的每个节点都是一个 Op， 每个 Op 都有自己需要运行的代码逻辑、输入和输出
+
+[Inputs] : 传递给 Op 的 Parameter 或 Artifact
+
+[Outputs] : 由 Pipeline 生成的 Parameter 或 Artifact
+
+[Parameter] : 即 string, list, array 等类型的参数
+
+[Artifact] : 由 Op 生成的文件, 在 Op 运行结束后，将会上传到 Artifact 仓库中
+
+三、Pipeline 编排详解
+Pipeline 是包含一系列输入数据和一个或者多个节点的机器学习的处理流程，在 Pipeline 中的每一个节点都是一个 Op， 
+这里 是平台基于 MNIST 数据集构建的一个示例，其中包含了数据处理、模型训练、模型预测三个步骤, 用户可以自行下载然后解压(tgz格式)
+
+数字识别是计算机从纸质文档、照片或其他来源接收、理解并识别可读的数字的能力，目前比较受关注的是手写数字识别。
+手写数字识别是一个典型的图像分类问题，已经被广泛应用于汇款单号识别、手写邮政编码识别等领域， MNIST 是深度学习领域标准、易用的成熟数据集，包含60000条训练样本和10000条测试样本。
+
+解压后的目录结构如下所示：
+
+mnist_cpu
+├── code # 存放运行代码的目录
+│   ├── data_reader.py # 定义了数据加载的逻辑
+│   └── model_train.py # 定义了模型训练和模型预测的逻辑
+├── data
+│   └── mnist.json # MNIST 数据集
+└── mnist.ppl # ppl 文件，定义了需要运行的 pipeline。
+
+其中 code/data_reader.py 和 code/model_train.py 就是普通的 python 脚本，包含了模型训练和模型预测的全部逻辑。 
+而 data/mnist.json 就是 json 格式的 MNIST 数据集。 在 mnist.ppl 这个文件中，我们定义了一个 pipeline,
+该文件的完整内容如下：
+
+# 从 pipeline 中 导入 ScriptOp， FuncOp 等
+from pipeline.dsl import ScriptOp
+from pipeline.dsl import FuncOp
+from pipeline.dsl import OutputResource
+from pipeline.interface import Run
+
+# 通过 FuncOp 定义一个 op, 用于处理数据
+@FuncOp(basedir="./data")
+def data_process_op(input_data, train_data, predict_data):
+    """ data process """
+    import json
+
+    with open(input_data, 'r') as fp:
+        data = json.load(fp)
+
+    # 将 处理后的训练数据写入至输出 artifact[train_data] 中
+    with open(train_data, 'w') as fp:
+        json.dump(data[0], fp)
+
+    # 将 处理后的预测数据写入至输出 artifact[predict_data] 中
+    with open(predict_data, 'w') as fp:
+        json.dump(data[1], fp)
+
+def mnist_train_op(epoch=1, batch_size=100, mode="train", inputs=None):
+    # 直接通过初始化 ScriptOp 来创建一个 op, 用于模型训练,
+    # 定义了一个输出 artifact[model],  在 command 执行结束后，会将
+    # 输出 artifact[model] 的本地存储路径下的所有文件打包上传至 artifact 仓库中
+    return ScriptOp(name="mnist train op",
+                    command=["python3", "model_train.py"],
+                    arguments=[
+                                "--epoch", epoch,
+                                "--batch_size", batch_size,
+                                "--mode", mode,
+                                "--model_path", "output/mnist_cpu",
+                                "--datafile", "train_data.json"
+                            ],
+                    inputs=inputs,
+                    outputs={"model": "output"},
+                    basedir="./code",
+                    image="registry.baidubce.com/paddlepaddle/paddle:2.1.1"
+                    )
+
+def mnist_predict_op(epoch=1, batch_size=100, mode="predict", inputs=None):
+    # 直接通过初始化 ScriptOp 来创建一个 op, 用于模型预测
+    return ScriptOp(name="mnist predit op",
+                    command=["python3", "model_train.py"],
+                    arguments=[
+                                "--epoch", epoch,
+                                "--batch_size", batch_size,
+                                "--mode", mode,
+                                "--model_path", "init_model/mnist_cpu",
+                                "--datafile", "predict_data.json"
+                            ],
+                    inputs=inputs,
+                    basedir="./code",
+                    image="registry.baidubce.com/paddlepaddle/paddle:2.1.1"
+                    )
+                    
+def pipeline_func(epoch=1, batch_size=100):
+    # 通过将 data_process_op 的参数 train_data 和 predict_data 赋值为 OutputResource(), 为该 op 声明了两个输出 artifact[train_data, predict_data]
+    op1 = data_process_op(input_data="mnist.json",
+                          train_data=OutputResource(), 
+                          predict_data=OutputResource()
+                         )
+
+    # 通过 inputs={"train_data": (op1.outputs["train_data"], "./train_data.json")}, 将 op1 的输出 artifact[train_data] 作为 op2 的输入artifact[train_data]
+    op2 = mnist_train_op(epoch=epoch,
+                         batch_size=batch_size,
+                         inputs={
+                             "train_data": (op1.outputs["train_data"], "./train_data.json")
+                         }
+                        )
+
+    # 通过 inputs={"predict_data": (op1.outputs["predict_data"], "./predict_data.json"), "init_model": op2.outputs["model"]}，
+    # 为 op3 声明了两个输入 artifact, 分别为 predict_data 和 init_model， 其分别来源于 op1 的输出 artifact [predict_data] 和 op2 的 输出 artifact [model]
+    op3 = mnist_predict_op(epoch=epoch,
+                           batch_size=batch_size,
+                           inputs={
+                               "predict_data": (op1.outputs["predict_data"], "./predict_data.json"), 
+                               "init_model": op2.outputs["model"]
+                           }
+                          )
+
+# 调用 Run().create() 接口，以运行 pipeline
+Run().create(pipeline_func)
